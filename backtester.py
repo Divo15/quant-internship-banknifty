@@ -3,7 +3,7 @@ Backtesting engine.
 
 Supports two modes:
 
-  ``single``  – long / short a single asset (mean-reversion strategy)
+  ``singlee``  – long / short a single asset (mean-reversion strategy)
   ``pairs``   – long / short a spread across two assets
 
 Both modes track:
