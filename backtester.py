@@ -158,9 +158,7 @@ class Backtester:
                 if in_pos:
                     exit_price = price[i] * (1.0 - self.slip * direction)
                     exit_cost = abs(n_units) * exit_price * self.tc
-                    # INCREMENTAL P&L for this bar (last MTM bar → exit)
                     pnl[i] += n_units * (exit_price - price[i - 1]) - exit_cost
-                    # TOTAL trade P&L for the log (entry → exit, all costs)
                     total_trade = (n_units * (exit_price - entry_price)
                                    - entry_cost - exit_cost)
 
@@ -186,13 +184,11 @@ class Backtester:
                     entry_i = i
                     n_units = direction * self.initial_capital / entry_price
                     entry_cost = abs(n_units) * entry_price * self.tc
-                    # Deduct entry cost + within-bar slippage
                     pnl[i] -= entry_cost
                     pnl[i] += n_units * (price[i] - entry_price)
                     in_pos = True
 
             elif in_pos:
-                # mark to market
                 pnl[i] = n_units * (price[i] - price[i - 1])
 
         # Force-close any open position at end of data

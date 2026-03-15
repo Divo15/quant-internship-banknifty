@@ -59,9 +59,8 @@ class DataLoader:
         self._handle_missing()
         self._detect_outliers()
 
-        # Final safety net
-        self.clean_data = self.raw_data.apply(pd.to_numeric, errors="coerce")
-        self.clean_data = self.clean_data.dropna(how="all").ffill().bfill()
+        # Final safety net (inplace for speed)
+        self.clean_data = self.raw_data.dropna(how="all").ffill().bfill()
 
         n_rows, n_cols = self.clean_data.shape
         print(f"\n[DataLoader] Final shape : {n_rows:,} rows x {n_cols} columns")

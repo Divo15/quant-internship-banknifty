@@ -58,13 +58,12 @@ class PerformanceAnalyzer:
         if n_years >= 1.0 and total_ret > -1.0:
             ann_ret = (1.0 + total_ret) ** (1.0 / n_years) - 1.0
         else:
-            ann_ret = total_ret / max(n_years, 1.0)  # simple linear for edge cases
+            ann_ret = total_ret / max(n_years, 1.0)
 
         # ---- risk ----
         sharpe = (
             (rets.mean() / rets.std()) * np.sqrt(mpy) if rets.std() > 0 else 0.0
         )
-        # Sortino (downside deviation)
         downside = rets[rets < 0]
         down_std = downside.std() if len(downside) > 0 else 1e-10
         sortino = (rets.mean() / down_std) * np.sqrt(mpy) if down_std > 0 else 0.0
@@ -72,8 +71,6 @@ class PerformanceAnalyzer:
         cum_max = pv.cummax()
         dd = (pv - cum_max) / cum_max
         max_dd = dd.min()
-
-        # Calmar (annualised return / |max drawdown|)
         calmar = ann_ret / abs(max_dd) if abs(max_dd) > 1e-10 else 0.0
 
         # ---- trades ----
@@ -109,12 +106,50 @@ class PerformanceAnalyzer:
         }
 
         print("\n" + "=" * 60)
-        print("  PERFORMANCE METRICS")
+        print("  PERFORMANCE METRICS (FULL PERIOD)")
         print("=" * 60)
         for k, v in self.metrics.items():
             print(f"  {k:.<40s} {v}")
         print("=" * 60)
+
+        # ---- IN-SAMPLE vs OUT-OF-SAMPLE breakdown ----
+        self._print_is_oos_breakdown()
+
         return self.metrics
+
+    def _print_is_oos_breakdown(self) -> None:
+        """Print in-sample vs out-of-sample metrics for overfitting validation."""
+        if len(self.trade_log) == 0:
+            return
+
+        pv = self.equity_curve["portfolio_value"]
+        split_idx = int(len(pv) * self.train_frac)
+        split_time = pv.index[split_idx]
+
+        # Split trades into IS / OOS
+        trades = self.trade_log
+        is_trades = trades[trades["entry_time"] < split_time]
+        oos_trades = trades[trades["entry_time"] >= split_time]
+
+        for label, t in [("IN-SAMPLE", is_trades), ("OUT-OF-SAMPLE", oos_trades)]:
+            n = len(t)
+            if n == 0:
+                continue
+            wins = t[t["pnl"] > 0]
+            losses = t[t["pnl"] <= 0]
+            wr = len(wins) / n if n > 0 else 0
+            pnl = t["pnl"].sum()
+            gl = abs(losses["pnl"].sum()) if len(losses) > 0 else 0
+            pf = wins["pnl"].sum() / gl if gl > 0 else float("inf")
+            avg_w = wins["pnl"].mean() if len(wins) > 0 else 0
+            avg_l = abs(losses["pnl"].mean()) if len(losses) > 0 else 0
+
+            print(f"\n  [{label}]")
+            print(f"    Trades: {n}  |  Win Rate: {wr:.1%}  |  "
+                  f"PF: {pf:.2f}  |  P&L: ${pnl:,.0f}")
+            print(f"    Avg Win: ${avg_w:,.0f}  |  Avg Loss: ${avg_l:,.0f}")
+
+        print()
 
     # ================================================================= #
     #  Plots                                                              #
@@ -160,11 +195,17 @@ class PerformanceAnalyzer:
         short_e = pos_chg[(pos_chg == -1)].index
         exits   = pos_chg[(pos_chg != 0) & (sdf["position"] == 0)].index
 
-        ax.scatter(long_e,  sdf.loc[long_e, "price"],
+        # Limit scatter points for speed
+        max_markers = 500
+        le = long_e[::max(1, len(long_e) // max_markers)]
+        se = short_e[::max(1, len(short_e) // max_markers)]
+        ex = exits[::max(1, len(exits) // max_markers)]
+
+        ax.scatter(le,  sdf.loc[le, "price"],
                    marker="^", color="green", s=12, zorder=5, label="Long Entry")
-        ax.scatter(short_e, sdf.loc[short_e, "price"],
+        ax.scatter(se, sdf.loc[se, "price"],
                    marker="v", color="red", s=12, zorder=5, label="Short Entry")
-        ax.scatter(exits,   sdf.loc[exits, "price"],
+        ax.scatter(ex,   sdf.loc[ex, "price"],
                    marker="x", color="gray", s=10, zorder=5, label="Exit", alpha=0.5)
 
         # in-sample / out-of-sample divider
@@ -392,6 +433,6 @@ class PerformanceAnalyzer:
                 ax.axvspan(idx[s], idx[e], alpha=0.04, color="red")
 
     def _save(self, fname: str) -> None:
-        plt.savefig(os.path.join(self.results_dir, fname), dpi=150, bbox_inches="tight")
+        plt.savefig(os.path.join(self.results_dir, fname), dpi=100, bbox_inches="tight")
         plt.close()
         print(f"[Analysis] Saved {fname}")

@@ -2,7 +2,7 @@
 Entry point -- orchestrates the full trading pipeline.
 
 Auto-detects the data format and routes to the appropriate strategy:
-  * Single-asset OHLC  -->  MeanReversionStrategy
+  * Single-asset OHLC  -->  MeanReversionStrategy (momentum or mean-reversion)
   * Multi-asset prices  -->  PairsStrategy
 
 Usage:
@@ -63,6 +63,7 @@ def main(data_path: str = cfg.DATA_PATH) -> dict:
             train_frac=cfg.TRAIN_FRAC,
             use_trend_filter=cfg.USE_TREND_FILTER,
             trend_lookback=cfg.TREND_LOOKBACK,
+            strategy_mode=cfg.STRATEGY_MODE,
         )
         strategy.analyze(price_series)
         signals = strategy.generate_signals(price_series)
