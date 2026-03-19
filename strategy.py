@@ -8,11 +8,10 @@ Trading strategy module.
       * Parameters are derived from statistical theory, not swept.
       * Mode (momentum vs mean-reversion) is auto-selected from Hurst.
       * Lookback comes from 2 × half-life (Ornstein-Uhlenbeck theory).
-      * Target/stop = EXIT_MULT × sqrt(HL) × rolling_σ_minute
-        (adapts to current volatility, not fixed to in-sample).
-      * Every RECALIB_EVERY bars, re-estimates Hurst exponent to
-        dynamically switch between momentum and mean-reversion.
-        This is standard "walk-forward" practice used in production.
+      * Exit levels use ROLLING volatility (last 60 trading days) so they
+        adapt to current market conditions using only past data.
+      * Asymmetric TP/SL: momentum lets winners run (1.5:1 R:R);
+        mean-reversion takes quick profits and gives room for convergence.
 
 ``PairsStrategy``  (multi-asset)
     Cointegration-based pairs trading (Engle-Granger).
@@ -41,14 +40,11 @@ class MeanReversionStrategy:
     All parameters come from standard quant finance theory:
       - Entry Z = 2.0  (standard significance threshold)
       - Lookback = 2 * half-life  (Ornstein-Uhlenbeck process theory)
-      - Target/Stop = EXIT_MULT * sqrt(HL) * sigma_minute
-        (random-walk theory: separates signal from noise)
-      - Mode = auto-selected from Hurst exponent (> 0.5 → momentum)
+      - Exit levels = EXIT_MULT * sqrt(HL) * rolling_sigma
+        (adapts to current volatility using 60-day rolling window)
+      - Asymmetric TP/SL: momentum uses 1.5:1 R:R (let winners run)
+      - Mode = auto-selected from Hurst exponent (> 0.5 -> momentum)
       - Trend filter = SMA(200)  (universal standard)
-
-    The exit levels are derived from in-sample volatility and applied
-    consistently across all periods. This is simpler and more robust
-    than rolling-vol exits which overreact to short-term changes.
     """
 
     def __init__(
@@ -64,6 +60,9 @@ class MeanReversionStrategy:
         trend_lookback: int = cfg.TREND_LOOKBACK,
         strategy_mode: str = cfg.STRATEGY_MODE,
         exit_mult: float = cfg.EXIT_MULT,
+        vol_lookback_days: int = cfg.VOL_LOOKBACK_DAYS,
+        tp_ratio: float = cfg.TP_RATIO,
+        sl_ratio: float = cfg.SL_RATIO,
     ):
         self.entry_z = entry_z
         self.exit_z = exit_z
@@ -76,6 +75,9 @@ class MeanReversionStrategy:
         self.trend_lookback = trend_lookback
         self.exit_mult = exit_mult
         self.strategy_mode_cfg = strategy_mode
+        self.vol_lookback_days = vol_lookback_days
+        self.tp_ratio = tp_ratio
+        self.sl_ratio = sl_ratio
 
         # Populated during analyze()
         self.half_life: float = 0.0
@@ -131,14 +133,20 @@ class MeanReversionStrategy:
         print(f"[Strategy] Initial mode    : "
               f"{'MOMENTUM' if self.momentum else 'MEAN-REVERSION'}")
 
-        # 5. Sigma
+        # 5. Sigma (IS reference only; actual exits use rolling sigma)
         self.sigma_minute = float(np.std(close_rets))
-        derived_exit = self.exit_mult * np.sqrt(self.half_life) * self.sigma_minute
+        base_exit = self.exit_mult * np.sqrt(self.half_life) * self.sigma_minute
         print(f"[Strategy] sigma_minute    : {self.sigma_minute*100:.4f}%")
-        print(f"[Strategy] Derived target  : {derived_exit*100:.4f}%  "
+        print(f"[Strategy] Base exit (IS)  : {base_exit*100:.4f}%  "
               f"({self.exit_mult} x sqrt({self.half_life:.0f}) x sigma)")
-        print(f"[Strategy] Fixed exit      : {derived_exit*100:.4f}%  "
-              f"(derived from IS sigma, applied to all periods)")
+        print(f"[Strategy] Walk-forward    : rolling {self.vol_lookback_days}-day vol "
+              f"(adapts to current regime)")
+        if self.momentum:
+            print(f"[Strategy] Asymmetric R:R  : TP={self.tp_ratio:.1f}x, "
+                  f"SL={self.sl_ratio:.1f}x (let winners run)")
+        else:
+            print(f"[Strategy] Asymmetric R:R  : TP={self.sl_ratio:.1f}x, "
+                  f"SL={self.tp_ratio:.1f}x (take quick profits)")
 
         return {
             "half_life": self.half_life, "hurst": self.hurst,
@@ -146,7 +154,7 @@ class MeanReversionStrategy:
             "lookback": self.lookback,
             "mode": "MOMENTUM" if self.momentum else "MEAN-REVERSION",
             "sigma_minute": self.sigma_minute,
-            "target_pct": derived_exit,
+            "target_pct": base_exit,
         }
 
     # ---- signal generation ---- #
@@ -194,11 +202,12 @@ class MeanReversionStrategy:
         index: pd.DatetimeIndex, trend_bull: np.ndarray,
     ) -> pd.Series:
         """
-        State machine: z-score entries + fixed-% exits.
+        State machine: z-score entries + dynamic %-exits.
 
-        Uses derived exit levels (EXIT_MULT * sqrt(HL) * sigma) for
-        symmetric take-profit and stop-loss. Includes trend filter
-        and end-of-day position flattening.
+        Exit levels adapt to current volatility via rolling sigma
+        (last VOL_LOOKBACK_DAYS trading days). Asymmetric TP/SL:
+          momentum  -> TP=1.5x, SL=1.0x (let winners run)
+          mean-rev  -> TP=1.0x, SL=1.5x (take quick profits)
         """
         z = z_score.values
         n = len(z)
@@ -206,15 +215,39 @@ class MeanReversionStrategy:
         cur = 0.0
         entry_price = 0.0
         _entry_z = self.entry_z
-        _exit_z = self.exit_z
         _use_trend = self.use_trend_filter
         exit_mult = self.exit_mult
         sqrt_hl = np.sqrt(self.half_life)
         is_momentum = self.momentum
         fallback_sigma = self.sigma_minute
-        fixed_exit = exit_mult * sqrt_hl * fallback_sigma  # derived from IS
 
-        # EOD mask (vectorised)
+        # ---- Precompute rolling sigma (fast numpy version) ----
+        log_rets = np.empty(n, dtype=np.float64)
+        log_rets[0] = 0.0
+        log_rets[1:] = np.diff(np.log(prices))
+        vol_window = max(1, self.vol_lookback_days * cfg.MINUTES_PER_DAY)
+        
+        # Fast rolling std using pandas (optimized)
+        rolling_sigma = pd.Series(log_rets).rolling(
+            window=vol_window, min_periods=max(100, vol_window // 10)
+        ).std().values
+        # Fill NaNs with fallback (early bars before window fills)
+        rolling_sigma = np.where(
+            np.isnan(rolling_sigma) | (rolling_sigma < 1e-10),
+            fallback_sigma,
+            rolling_sigma,
+        )
+
+        # ---- Precompute dynamic exit arrays (vectorised) ----
+        base_exit = exit_mult * sqrt_hl * rolling_sigma  # shape (n,)
+        if is_momentum:
+            tp_exit = base_exit * self.tp_ratio   # wider TP (let winners run)
+            sl_exit = base_exit * self.sl_ratio   # standard SL
+        else:
+            tp_exit = base_exit * self.sl_ratio   # tight TP (take quick profits)
+            sl_exit = base_exit * self.tp_ratio   # wide SL (room for convergence)
+
+        # ---- EOD mask (vectorised) ----
         if self.close_eod:
             day_int = index.normalize().asi8
             day_change = np.empty(n, dtype=bool)
@@ -232,6 +265,7 @@ class MeanReversionStrategy:
             eod_mask = np.zeros(n, dtype=bool)
             day_change = np.zeros(n, dtype=bool)
 
+        # ---- Main loop ----
         for i in range(n):
             # Force flat at day boundary
             if day_change[i]:
@@ -265,18 +299,18 @@ class MeanReversionStrategy:
                     entry_price = prices[i]
 
             else:
-                # --- Exit: fixed-% derived from in-sample sigma ---
-                # Using fixed IS sigma (not rolling) avoids overreacting
-                # to short-term vol changes and provides stable exits.
+                # --- Exit: dynamic-% from rolling sigma + asymmetric R:R ---
+                tp_i = tp_exit[i]
+                sl_i = sl_exit[i]
                 if cur == 1.0:
-                    if prices[i] >= entry_price * (1.0 + fixed_exit):
+                    if prices[i] >= entry_price * (1.0 + tp_i):
                         cur = 0.0  # take profit
-                    elif prices[i] <= entry_price * (1.0 - fixed_exit):
+                    elif prices[i] <= entry_price * (1.0 - sl_i):
                         cur = 0.0  # stop loss
                 elif cur == -1.0:
-                    if prices[i] <= entry_price * (1.0 - fixed_exit):
+                    if prices[i] <= entry_price * (1.0 - tp_i):
                         cur = 0.0  # take profit
-                    elif prices[i] >= entry_price * (1.0 + fixed_exit):
+                    elif prices[i] >= entry_price * (1.0 + sl_i):
                         cur = 0.0  # stop loss
 
             pos[i] = cur
