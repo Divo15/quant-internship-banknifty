@@ -64,6 +64,9 @@ def main(data_path: str = cfg.DATA_PATH) -> dict:
             use_trend_filter=cfg.USE_TREND_FILTER,
             trend_lookback=cfg.TREND_LOOKBACK,
             strategy_mode=cfg.STRATEGY_MODE,
+            vol_lookback_days=cfg.VOL_LOOKBACK_DAYS,
+            tp_ratio=cfg.TP_RATIO,
+            sl_ratio=cfg.SL_RATIO,
         )
         strategy.analyze(price_series)
         signals = strategy.generate_signals(price_series)
