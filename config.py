@@ -21,7 +21,7 @@ OUTLIER_REPLACE_WINDOW = 10
 DROP_MISSING_PCT = 0.20
 
 # --- Strategy (common) ----------------------------------------------------
-TRAIN_FRAC = 0.70
+TRAIN_FRAC = 0.80
 ENTRY_Z = 2.0                        # Standard 2-sigma threshold
 EXIT_Z = 0.5                         # Fallback z-score exit
 STOP_Z = 3.5                         # Fallback z-score stop
@@ -40,9 +40,14 @@ CLOSE_EOD = True
 EOD_EXIT_BUFFER = 5
 USE_TREND_FILTER = True              # Only trade in direction of trend
 TREND_LOOKBACK = 200                 # Standard 200-bar SMA
-EXIT_MULT = 3.0                      # target/stop = EXIT_MULT * sqrt(HL) * sigma_minute
+EXIT_MULT = 3.0                      # base exit = EXIT_MULT * sqrt(HL) * rolling_sigma
                                      #   3-sigma: expected move over 1 half-life that
                                      #   separates signal from noise (random-walk theory)
+VOL_LOOKBACK_DAYS = 60               # Rolling window for volatility (60 trading days = 1 quarter)
+                                     #   standard realized-vol estimation horizon
+TP_RATIO = 1.5                       # Momentum: target = 1.5 * base_exit (let winners run)
+SL_RATIO = 1.0                       # Momentum: stop = 1.0 * base_exit (cut losers fast)
+                                     #   For mean-reversion these are reversed (tight TP, wide SL)
 
 # --- Backtester ------------------------------------------------------------
 INITIAL_CAPITAL = 100_000.0
